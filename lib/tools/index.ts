@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { twitterTools } from "./twitter";
 import { instagramTools } from "./instagram";
 import { tiktokTools } from "./tiktok";
+import { memoryTools } from "./memory";
 
 /**
  * One module per real automation (see twitter.ts, instagram.ts, tiktok.ts)
@@ -25,6 +26,7 @@ const getCurrentTime: ToolDefinition = {
 
 export const toolRegistry: ToolDefinition[] = [
   getCurrentTime,
+  ...memoryTools,
   ...twitterTools,
   ...instagramTools,
   ...tiktokTools,

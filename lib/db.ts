@@ -32,6 +32,12 @@ function createDb(): Database.Database {
       result TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   return db;
@@ -49,8 +55,15 @@ export interface ConversationMessage {
   created_at: string;
 }
 
-export function insertMessage(role: "user" | "assistant", content: string): void {
-  db.prepare("INSERT INTO conversations (role, content) VALUES (?, ?)").run(role, content);
+/** Returns the new row's id, so a caller can delete it again if the turn
+ * gets interrupted before a reply is ever produced (see streamAssistantReply). */
+export function insertMessage(role: "user" | "assistant", content: string): number {
+  const info = db.prepare("INSERT INTO conversations (role, content) VALUES (?, ?)").run(role, content);
+  return Number(info.lastInsertRowid);
+}
+
+export function deleteMessage(id: number): void {
+  db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
 }
 
 export function getRecentMessages(limit = 50): ConversationMessage[] {
@@ -98,4 +111,35 @@ export function countRecentActivity(toolName: string, windowMinutes: number): nu
     )
     .get(toolName, `-${windowMinutes} minutes`) as { count: number };
   return row.count;
+}
+
+export interface Memory {
+  id: number;
+  content: string;
+  created_at: string;
+}
+
+export function insertMemory(content: string): void {
+  db.prepare("INSERT INTO memories (content) VALUES (?)").run(content);
+}
+
+/** Most recent memories first, capped -- same defensive limit as
+ * getRecentMessages, so this can't silently balloon every request's
+ * context the way unbounded conversation history once did. */
+export function getAllMemories(limit = 60): Memory[] {
+  return db.prepare("SELECT * FROM memories ORDER BY id DESC LIMIT ?").all(limit) as Memory[];
+}
+
+export function countMemories(): number {
+  const row = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
+  return row.count;
+}
+
+/** Deletes memories whose content contains `topic` (case-insensitive).
+ * Returns how many were removed. */
+export function deleteMemoriesMatching(topic: string): number {
+  const info = db
+    .prepare("DELETE FROM memories WHERE content LIKE ? COLLATE NOCASE")
+    .run(`%${topic}%`);
+  return info.changes;
 }

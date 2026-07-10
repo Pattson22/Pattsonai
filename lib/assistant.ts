@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt, OutputMode } from "./persona";
-import { getRecentMessages, insertMessage, logActivity } from "./db";
+import { getRecentMessages, getAllMemories, insertMessage, deleteMessage, logActivity } from "./db";
 import { findTool, toolDefinitionsForClaude } from "./tools";
 
 const MODEL = "claude-sonnet-5";
@@ -25,6 +25,13 @@ const MAX_TOOL_ITERATIONS = 8;
 // with "container_id is required" the moment a search needs to continue.
 // The basic variant is a plain single-shot search with no such state.
 const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 3 } as const;
+
+// Also Anthropic-hosted, same no-local-handler pattern as web search. Closes
+// a real gap: persona.ts's own response-style examples already describe Pat
+// "running a math tool" for things like compound interest -- until now
+// nothing backed that up. Billed free when used alongside web search, which
+// is already in the tools list below.
+const CODE_EXECUTION_TOOL = { type: "code_execution_20260521", name: "code_execution" } as const;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -73,59 +80,78 @@ async function executeTool(
  */
 export async function* streamAssistantReply(
   userMessage: string,
-  mode: OutputMode = "text"
+  mode: OutputMode = "text",
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
-  insertMessage("user", userMessage);
+  const userMessageId = insertMessage("user", userMessage);
 
   let messages = historyForClaude();
   let fullReplyForStorage = "";
+  const memories = getAllMemories().map((m) => m.content);
+  const systemPrompt = buildSystemPrompt(mode, memories);
 
-  for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
-    const stream = anthropic.messages.stream({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(mode),
-      messages,
-      tools: [...toolDefinitionsForClaude(), WEB_SEARCH_TOOL],
-      // Sonnet 5 runs adaptive extended thinking + "high" effort by default
-      // unless told otherwise -- great for hard reasoning, but adds a real
-      // reasoning phase before any text streams back. Pat is a real-time
-      // chat/voice assistant answering mostly simple requests, where speed
-      // to first token matters far more than deep reasoning depth.
-      thinking: { type: "disabled" },
-      output_config: { effort: "low" },
-    });
+  // Sonnet 5 runs adaptive extended thinking + "high" effort by default
+  // unless told otherwise -- great for hard reasoning, but adds a real
+  // reasoning phase before any text streams back. Voice is spoken back
+  // aloud, so speed to first token matters far more there than reasoning
+  // depth; text mode has no TTS wait, so it can afford real thinking.
+  const isVoice = mode === "voice";
 
-    for await (const event of stream) {
-      if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-        fullReplyForStorage += event.delta.text;
-        yield event.delta.text;
+  try {
+    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+      const stream = anthropic.messages.stream(
+        {
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: systemPrompt,
+          messages,
+          tools: [...toolDefinitionsForClaude(), WEB_SEARCH_TOOL, CODE_EXECUTION_TOOL],
+          thinking: isVoice ? { type: "disabled" } : { type: "adaptive" },
+          output_config: { effort: isVoice ? "low" : "medium" },
+        },
+        { signal }
+      );
+
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          fullReplyForStorage += event.delta.text;
+          yield event.delta.text;
+        }
       }
+
+      const finalMessage = await stream.finalMessage();
+      messages = [...messages, { role: "assistant", content: finalMessage.content }];
+
+      const toolUseBlocks = finalMessage.content.filter(
+        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+      );
+
+      if (toolUseBlocks.length === 0) {
+        break;
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of toolUseBlocks) {
+        const { output, isError } = await executeTool(block.name, block.input as Record<string, unknown>);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify(output),
+          is_error: isError,
+        });
+      }
+      messages = [...messages, { role: "user", content: toolResults }];
     }
 
-    const finalMessage = await stream.finalMessage();
-    messages = [...messages, { role: "assistant", content: finalMessage.content }];
-
-    const toolUseBlocks = finalMessage.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
-    );
-
-    if (toolUseBlocks.length === 0) {
-      break;
+    insertMessage("assistant", fullReplyForStorage);
+  } catch (err) {
+    if (signal?.aborted) {
+      // The user interrupted this reply with a follow-up -- discard the
+      // abandoned turn entirely (no reply was ever produced for it) rather
+      // than leaving an orphaned, unanswered message sitting in history.
+      deleteMessage(userMessageId);
+      return;
     }
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of toolUseBlocks) {
-      const { output, isError } = await executeTool(block.name, block.input as Record<string, unknown>);
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: JSON.stringify(output),
-        is_error: isError,
-      });
-    }
-    messages = [...messages, { role: "user", content: toolResults }];
+    throw err;
   }
-
-  insertMessage("assistant", fullReplyForStorage);
 }

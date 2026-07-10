@@ -73,22 +73,30 @@ function getSpeechRecognitionCtor(): PattsonSpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-const FEMALE_VOICE_NAME = /female|\b(susan|hazel|zira|samantha|victoria|karen|moira|tessa|fiona|serena|kate|amy|emma|joanna|salli|kimberly)\b/i;
+const FEMALE_VOICE_NAME = /female|\b(susan|hazel|zira|samantha|victoria|karen|moira|tessa|fiona|serena|kate|amy|emma|joanna|salli|kimberly|sonia|libby)\b/i;
 const MALE_VOICE_NAME = /male|\b(daniel|george|ryan|arthur|oliver|james|david|mark|alex|fred|thomas|brian|matthew|justin|eric)\b/i;
+// Windows 11 / Chrome now surface cloud-backed "Online (Natural)" voices
+// (e.g. "Microsoft Ryan Online (Natural)") alongside the old offline SAPI
+// ones ("Microsoft David Desktop") -- the former are dramatically less
+// robotic. "Neural"/"Premium"/"Enhanced" cover the equivalent naming on
+// other platforms (Google/Android, macOS). Free -- still just the browser's
+// own voice list, only ranked smarter instead of taking the first match.
+const QUALITY_VOICE_NAME = /natural|neural|premium|enhanced/i;
 
 function pickBritishVoice(): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
-  const british = voices.filter((v) => /en[-_]GB/i.test(v.lang));
-  const pool = british.length ? british : voices;
+  if (voices.length === 0) return null;
 
-  return (
-    pool.find((v) => MALE_VOICE_NAME.test(v.name) && !FEMALE_VOICE_NAME.test(v.name)) ??
-    pool.find((v) => !FEMALE_VOICE_NAME.test(v.name)) ??
-    pool[0] ??
-    voices.find((v) => v.default) ??
-    voices[0] ??
-    null
-  );
+  function score(v: SpeechSynthesisVoice): number {
+    let s = 0;
+    if (QUALITY_VOICE_NAME.test(v.name)) s += 4;
+    if (/en[-_]GB/i.test(v.lang)) s += 2;
+    if (MALE_VOICE_NAME.test(v.name) && !FEMALE_VOICE_NAME.test(v.name)) s += 1;
+    return s;
+  }
+
+  const ranked = [...voices].sort((a, b) => score(b) - score(a));
+  return ranked[0] ?? voices.find((v) => v.default) ?? null;
 }
 
 // Short ALL-CAPS tokens (2-4 letters) are a classic TTS trap -- engines
@@ -167,6 +175,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [listening, setListening] = useState(false);
@@ -185,6 +194,9 @@ export default function Home() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const meterRafRef = useRef<number | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingOriginalTextRef = useRef("");
+  const activeRequestIdRef = useRef(0);
 
   const orbState: OrbState = listening ? "listening" : speaking ? "speaking" : sending ? "thinking" : "standby";
 
@@ -210,6 +222,12 @@ export default function Home() {
       .then(setActivity)
       .catch(() => {
         // Non-critical -- the chat still works without the activity panel.
+      });
+    fetch("/api/memory")
+      .then((res) => res.json())
+      .then((data: { count: number }) => setMemoryCount(data.count))
+      .catch(() => {
+        // Non-critical -- just the sidebar count.
       });
   }
 
@@ -375,7 +393,19 @@ export default function Home() {
     };
 
     wakeRecognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      // If .start() throws synchronously (e.g. InvalidStateError from
+      // starting too soon after another session ended), neither onerror nor
+      // onend will ever fire for this dead instance -- without this catch,
+      // the wake listener just dies silently with no retry, and Voice mode
+      // goes permanently quiet until the user manually re-enables it.
+      wakeRecognitionRef.current = null;
+      if (voiceModeRef.current && !listeningRef.current && !sendingRef.current) {
+        window.setTimeout(startWakeListener, 500);
+      }
+    }
   }
 
   function closeVoiceOverlay() {
@@ -400,6 +430,12 @@ export default function Home() {
     const utterance = new SpeechSynthesisUtterance(toSpeechText(text));
     const voice = pickBritishVoice();
     if (voice) utterance.voice = voice;
+    // Default rate (1.0) reads slightly clipped/rushed on most engines, and
+    // default pitch on the older SAPI-style voices skews thin and robotic.
+    // A touch slower and a touch lower is a free, zero-latency way to sound
+    // more like a measured butler than a phone menu.
+    utterance.rate = 0.96;
+    utterance.pitch = 0.94;
     utterance.onstart = () => {
       setSpeaking(true);
       setVoiceOverlayOpen(true);
@@ -430,7 +466,17 @@ export default function Home() {
 
   async function sendMessage(overrideText?: string) {
     const text = (overrideText ?? input).trim();
-    if (!text || sending) return;
+    if (!text || sendingRef.current) return;
+
+    // Each call gets its own generation id + AbortController. If this call
+    // gets superseded by an interrupt, its own finally block must not be
+    // allowed to clobber the *new* call's sending state once that one has
+    // taken over -- comparing against this id (not the ref/state, which the
+    // new call will have already moved on) is what makes that safe.
+    const requestId = ++activeRequestIdRef.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    pendingOriginalTextRef.current = text;
 
     setInput("");
     setSending(true);
@@ -442,6 +488,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, mode: voiceModeRef.current ? "voice" : "text" }),
+        signal: controller.signal,
       });
 
       if (!res.body) throw new Error("No response stream from server");
@@ -466,6 +513,10 @@ export default function Home() {
 
       speak(replyText);
     } catch (err) {
+      // Deliberate interrupt, not a real failure -- interruptWithFollowUp
+      // already tore down this turn's messages and started the next one;
+      // showing a "connection trouble" bubble here would stomp on it.
+      if (err instanceof Error && err.name === "AbortError") return;
       setMessages((prev) => {
         const next = [...prev];
         next[next.length - 1] = {
@@ -475,13 +526,37 @@ export default function Home() {
         return next;
       });
     } finally {
-      setSending(false);
+      if (activeRequestIdRef.current === requestId) {
+        setSending(false);
+      }
       refreshActivity(); // any tool calls made during this reply show up now
     }
   }
 
+  // Cancels whatever's currently in flight and immediately starts a fresh
+  // request that folds the interrupting follow-up in with the original,
+  // unanswered message -- per the user's explicit choice of "interrupt and
+  // restart" over "queue for after".
+  function interruptWithFollowUp(followUpText: string) {
+    const original = pendingOriginalTextRef.current;
+    abortControllerRef.current?.abort();
+    setMessages((prev) => prev.slice(0, -2)); // drop the abandoned user+assistant pair
+    sendingRef.current = false;
+    setSending(false);
+    const combined = original
+      ? `${original}\n\n(I'm adding this before you could respond: ${followUpText})`
+      : followUpText;
+    sendMessage(combined);
+  }
+
   function startListening() {
-    if (sendingRef.current || listeningRef.current) return;
+    if (listeningRef.current) return;
+    // Captured once, at the moment listening starts -- not re-read later,
+    // since sendingRef.current can legitimately flip (e.g. the original
+    // reply finishes naturally while the user is still talking) before the
+    // final transcript arrives. What matters is what was true when the user
+    // chose to interrupt, not the state several seconds later.
+    const wasInterrupting = sendingRef.current;
     stopWakeListener();
 
     const SpeechRecognitionCtor = getSpeechRecognitionCtor();
@@ -490,7 +565,14 @@ export default function Home() {
     let gotFinal = false;
     const recognition = new SpeechRecognitionCtor();
     recognition.lang = "en-GB";
-    recognition.continuous = false;
+    // continuous, not one-shot: with continuous:false, Chrome can end the
+    // whole session on a brief mid-thought pause ("um... actually...")
+    // before a final result ever comes through, which reads as Pat
+    // abandoning the conversation. Final-result detection below already
+    // calls recognition.stop() itself the moment a complete utterance
+    // arrives, so this only buys patience for pauses, not extra listening
+    // after you're done talking.
+    recognition.continuous = true;
     recognition.interimResults = true;
 
     recognition.onresult = (event) => {
@@ -510,7 +592,11 @@ export default function Home() {
           setInput("");
           return;
         }
-        sendMessage(transcript);
+        if (wasInterrupting) {
+          interruptWithFollowUp(transcript);
+        } else {
+          sendMessage(transcript);
+        }
       }
     };
     recognition.onerror = () => {
@@ -520,10 +606,13 @@ export default function Home() {
     recognition.onend = () => {
       setListening(false);
       stopMicMeter();
-      // Nobody said anything before the recognizer timed out -- drop back
-      // to passive wake-word listening instead of leaving the overlay open
-      // with nothing happening.
-      if (!gotFinal && voiceModeRef.current) {
+      // Nobody said anything before the recognizer timed out. If this was a
+      // hands-free follow-up listen, drop back to passive wake-word
+      // listening instead of leaving the overlay open with nothing
+      // happening. If it was an interrupt attempt, the original request was
+      // never touched (only a successful transcript aborts it) -- just let
+      // it keep processing/speaking as if the mic click never happened.
+      if (!gotFinal && !wasInterrupting && voiceModeRef.current) {
         setVoiceOverlayOpen(false);
         startWakeListener();
       }
@@ -536,17 +625,21 @@ export default function Home() {
       recognition.start();
     } catch {
       // Browsers can throw (e.g. InvalidStateError) if a recognition session
-      // is started too soon after another one just ended -- don't leave the
-      // UI stuck showing "listening" with nothing actually running.
+      // is started too soon after another one just ended. Previously this
+      // just closed the overlay and stopped -- a dead end with no active
+      // AND no passive listening running, which looks exactly like Pat
+      // silently abandoning the conversation. Fall back to the passive
+      // wake listener instead, same as the no-speech-timeout path below.
       setListening(false);
       setVoiceOverlayOpen(false);
+      if (!wasInterrupting && voiceModeRef.current) {
+        startWakeListener();
+      }
     }
     startMicMeter();
   }
 
   function toggleListening() {
-    if (sending) return;
-
     if (listening) {
       recognitionRef.current?.stop();
       return;
@@ -605,6 +698,7 @@ export default function Home() {
           <div className={styles.sidebarMeta}>
             <span>Model · Claude Sonnet 5</span>
             <span>Session · Local-first</span>
+            <span>Memory · {memoryCount === null ? "…" : `${memoryCount} fact${memoryCount === 1 ? "" : "s"}`}</span>
           </div>
         </aside>
 
@@ -631,7 +725,13 @@ export default function Home() {
             className={styles.inputBar}
             onSubmit={(e) => {
               e.preventDefault();
-              sendMessage();
+              const text = input.trim();
+              if (!text) return;
+              if (sendingRef.current) {
+                interruptWithFollowUp(text);
+              } else {
+                sendMessage(text);
+              }
             }}
           >
             {voiceSupported && (
@@ -639,8 +739,7 @@ export default function Home() {
                 type="button"
                 className={`${styles.mic} ${listening ? styles.micActive : ""}`}
                 aria-pressed={listening}
-                aria-label={listening ? "Stop listening" : "Speak to Pat"}
-                disabled={sending}
+                aria-label={listening ? "Stop listening" : sending ? "Interrupt with a follow-up" : "Speak to Pat"}
                 onClick={toggleListening}
               >
                 <MicIcon />
@@ -650,15 +749,16 @@ export default function Home() {
               className={styles.textInput}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={listening ? "Listening, sir…" : "Speak or write to Pat…"}
-              disabled={sending}
+              placeholder={
+                listening ? "Listening, sir…" : sending ? "Add something before I finish…" : "Speak or write to Pat…"
+              }
             />
             {speaking ? (
               <button type="button" className={styles.stop} onClick={handleStopButton}>
                 Stop
               </button>
             ) : (
-              <button type="submit" className={styles.send} disabled={sending || !input.trim()} aria-label="Send">
+              <button type="submit" className={styles.send} disabled={!input.trim()} aria-label="Send">
                 <ArrowIcon />
               </button>
             )}
@@ -713,7 +813,9 @@ export default function Home() {
               ? input || "Listening, sir…"
               : speaking
                 ? messages[messages.length - 1]?.content ?? ""
-                : ""}
+                : sending
+                  ? "Tap the bell to add something before I finish"
+                  : ""}
           </p>
 
           <div className={styles.overlayControls}>
@@ -722,8 +824,7 @@ export default function Home() {
                 type="button"
                 className={`${styles.mic} ${listening ? styles.micActive : ""}`}
                 aria-pressed={listening}
-                aria-label={listening ? "Stop listening" : "Speak to Pat"}
-                disabled={sending}
+                aria-label={listening ? "Stop listening" : sending ? "Interrupt with a follow-up" : "Speak to Pat"}
                 onClick={toggleListening}
               >
                 <MicIcon />

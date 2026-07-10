@@ -89,8 +89,30 @@ Meta until the permission is granted.
   restructuring anything. This only covers *client-executed* tools (ones
   with a local `handler`, logged to `activity_log`) — see below for the
   one server-executed tool.
-- `lib/db.ts` — SQLite (`better-sqlite3`), local-first: `conversations` +
-  `activity_log` tables in `data/pattson.db` (gitignored).
+- `lib/db.ts` — SQLite (`better-sqlite3`), local-first: `conversations`,
+  `activity_log`, and `memories` tables in `data/pattson.db` (gitignored).
+
+### Memory
+
+Pat can save durable facts about you that persist across every future
+conversation, not just the last ~50 messages of raw history. Two tools in
+`lib/tools/memory.ts`: `remember_fact` (called unprompted whenever you
+share something worth knowing long-term — name, preferences, ongoing
+projects) and `forget_fact` (deletes anything matching a substring, for
+corrections). All remembered facts (capped at the most recent 60, same
+defensive limit as conversation history) are injected into every system
+prompt as a `## KNOWN CONTEXT ABOUT THE USER` section — see
+`buildSystemPrompt` in `lib/persona.ts`. The sidebar shows a live count;
+there's no dedicated memory-browsing UI yet.
+
+### Code execution
+
+Anthropic's hosted `code_execution_20260521` server tool (declared next to
+web search in `lib/assistant.ts`, same no-local-handler pattern) gives Pat
+real calculation and data-processing ability — closing a gap where
+`persona.ts`'s own response-style examples already described it "running a
+math tool" that didn't actually exist yet. Billed free when paired with
+web search, which is already in the tools list.
 
 ### Web search
 
@@ -132,14 +154,14 @@ device except to your own Anthropic API calls for the text turn itself.
 
 ## Performance
 
-`lib/assistant.ts` explicitly sets `thinking: { type: "disabled" }` and
-`output_config: { effort: "low" }` on every request. Claude Sonnet 5 runs
-adaptive extended thinking and "high" effort by default unless told
-otherwise — good for hard reasoning, but it adds a real reasoning phase
-before any text streams back, which is the wrong tradeoff for a
-real-time chat/voice assistant answering mostly simple requests. If a
-future use case needs deeper reasoning for a specific request, raise
-effort for that call rather than changing the global default.
+`lib/assistant.ts` sets `thinking`/`effort` per output mode rather than
+globally. Claude Sonnet 5 runs adaptive extended thinking and "high"
+effort by default unless told otherwise — good for hard reasoning, but it
+adds a real reasoning phase before any text streams back. Voice replies
+are spoken aloud, so speed to first token matters more than reasoning
+depth there: `thinking: "disabled"` + `effort: "low"`. Text mode has no
+TTS wait, so it trades some latency for real reasoning: `thinking:
+"adaptive"` + `effort: "medium"`.
 
 ## Known limitations
 

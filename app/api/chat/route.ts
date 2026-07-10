@@ -19,15 +19,21 @@ export async function POST(request: Request) {
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const chunk of streamAssistantReply(message, resolvedMode)) {
+        for await (const chunk of streamAssistantReply(message, resolvedMode, request.signal)) {
           controller.enqueue(encoder.encode(chunk));
         }
       } catch (err) {
-        controller.enqueue(
-          encoder.encode(
-            `\n\n[Pat encountered an error, sir: ${err instanceof Error ? err.message : String(err)}]`
-          )
-        );
+        // If the client aborted (interrupted with a follow-up), there's no
+        // one left to read this error and the controller may already be
+        // torn down -- streamAssistantReply already handled cleanup for
+        // that case, so only surface real errors here.
+        if (!request.signal.aborted) {
+          controller.enqueue(
+            encoder.encode(
+              `\n\n[Pat encountered an error, sir: ${err instanceof Error ? err.message : String(err)}]`
+            )
+          );
+        }
       } finally {
         controller.close();
       }
