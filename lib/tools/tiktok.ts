@@ -21,7 +21,7 @@ const postTiktok: ToolDefinition = {
   description:
     "Post a video to TikTok immediately, on the user's behalf, via TikTok's Direct Post API. This " +
     "publishes directly with no confirmation step. `video_url` must already be a publicly reachable " +
-    "URL (TikTok's servers pull the video directly); PATTSON cannot generate or host video itself in " +
+    "URL (TikTok's servers pull the video directly); Pat cannot generate or host video itself in " +
     "this version. IMPORTANT: until the user's TikTok developer app has completed review, posts can " +
     "only use privacy_level 'SELF_ONLY' (private, visible only to the poster) -- default to that " +
     "unless the user has explicitly said their app is approved for public posting, otherwise the " +

@@ -3,7 +3,7 @@ import { ToolDefinition } from "./index";
 import { countRecentActivity } from "../db";
 
 // Engineering safety net against a runaway loop or repeated tool-call bug --
-// NOT a permission gate. PATTSON's persona explicitly forgoes confirmation
+// NOT a permission gate. Pat's persona explicitly forgoes confirmation
 // before posting; this only stops something pathological, not a deliberate
 // burst of legitimate posts.
 const MAX_POSTS_PER_HOUR = 5;

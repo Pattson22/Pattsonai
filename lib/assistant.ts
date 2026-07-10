@@ -5,10 +5,26 @@ import { findTool, toolDefinitionsForClaude } from "./tools";
 
 const MODEL = "claude-sonnet-5";
 const MAX_TOKENS = 1024;
-// Safety cap on the tool-use loop below -- not a permission gate (PATTSON's
+// Safety cap on the tool-use loop below -- not a permission gate (Pat's
 // persona explicitly forgoes those), just an engineering guard against a
 // runaway back-and-forth if the model keeps requesting tools indefinitely.
 const MAX_TOOL_ITERATIONS = 8;
+
+// Anthropic-hosted server tool -- runs entirely on Anthropic's side (no
+// local handler, unlike the tools in lib/tools/index.ts). This is what
+// gives Pat real-time information Claude's training data can't have
+// (weather, news, current prices, "what happened today"), same mechanism
+// claude.ai itself uses for that. max_uses caps searches per reply so a
+// confused turn can't spiral into an expensive research spree.
+//
+// Deliberately the "basic" tool version (not the newer dynamic-filtering
+// _20260209 variant): the dynamic-filtering version runs its filtering as
+// code execution under the hood and expects a `container` id to be threaded
+// through follow-up requests when a search spans multiple turns, which this
+// app's simple history-replay loop (lib/db.ts) doesn't track -- it 400s
+// with "container_id is required" the moment a search needs to continue.
+// The basic variant is a plain single-shot search with no such state.
+const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 3 } as const;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -46,7 +62,7 @@ async function executeTool(
 }
 
 /**
- * Send `userMessage`, stream PATTSON's reply back as an async generator of
+ * Send `userMessage`, stream Pat's reply back as an async generator of
  * text chunks, executing any tool calls Claude makes along the way, and
  * persist both sides of the exchange to SQLite once the reply is final.
  *
@@ -70,7 +86,14 @@ export async function* streamAssistantReply(
       max_tokens: MAX_TOKENS,
       system: buildSystemPrompt(mode),
       messages,
-      tools: toolDefinitionsForClaude(),
+      tools: [...toolDefinitionsForClaude(), WEB_SEARCH_TOOL],
+      // Sonnet 5 runs adaptive extended thinking + "high" effort by default
+      // unless told otherwise -- great for hard reasoning, but adds a real
+      // reasoning phase before any text streams back. Pat is a real-time
+      // chat/voice assistant answering mostly simple requests, where speed
+      // to first token matters far more than deep reasoning depth.
+      thinking: { type: "disabled" },
+      output_config: { effort: "low" },
     });
 
     for await (const event of stream) {

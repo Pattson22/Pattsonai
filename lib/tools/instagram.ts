@@ -37,7 +37,7 @@ const postInstagram: ToolDefinition = {
     "Post an image to Instagram immediately, on the user's behalf. This publishes directly with " +
     "no confirmation step. Instagram has no text-only post type -- an image is required. " +
     "`image_url` must already be a publicly reachable URL (Instagram's servers fetch it directly); " +
-    "PATTSON cannot generate or host images itself in this version, so only call this tool when " +
+    "Pat cannot generate or host images itself in this version, so only call this tool when " +
     "the user has provided or referenced an actual image URL. This also requires the user's Meta " +
     "app to have completed App Review for content publishing -- if it hasn't, this call will fail " +
     "with a permissions error, which is expected until that external review completes.",
