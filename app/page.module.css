@@ -753,3 +753,129 @@
     padding: 16px 18px;
   }
 }
+
+/* memory management panel */
+
+.memoryTrigger {
+  all: unset;
+  cursor: pointer;
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  transition: color 0.15s ease;
+}
+
+.memoryTrigger:hover {
+  color: var(--primary);
+}
+
+.memoryPanel {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--bg) 75%, transparent);
+  padding: 24px;
+}
+
+.memoryPanelInner {
+  width: 100%;
+  max-width: 480px;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 20px 22px;
+  overflow: hidden;
+}
+
+.memoryPanelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-shrink: 0;
+}
+
+.memoryPanelHead h2 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.memoryPanelClose {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.memoryPanelClose:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.memoryList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.memoryItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.memoryItem:last-child {
+  border-bottom: none;
+}
+
+.memoryItemText {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.memoryItemDelete {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.memoryItemDelete svg {
+  width: 12px;
+  height: 12px;
+}
+
+.memoryItemDelete:hover {
+  border-color: var(--error);
+  color: var(--error);
+}

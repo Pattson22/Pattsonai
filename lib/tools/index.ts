@@ -3,6 +3,8 @@ import { twitterTools } from "./twitter";
 import { instagramTools } from "./instagram";
 import { tiktokTools } from "./tiktok";
 import { memoryTools } from "./memory";
+import { weatherTools } from "./weather";
+import { reminderTools } from "./reminders";
 
 /**
  * One module per real automation (see twitter.ts, instagram.ts, tiktok.ts)
@@ -27,6 +29,8 @@ const getCurrentTime: ToolDefinition = {
 export const toolRegistry: ToolDefinition[] = [
   getCurrentTime,
   ...memoryTools,
+  ...weatherTools,
+  ...reminderTools,
   ...twitterTools,
   ...instagramTools,
   ...tiktokTools,

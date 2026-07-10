@@ -17,6 +17,12 @@ interface ActivityEntry {
   created_at: string;
 }
 
+interface MemoryEntry {
+  id: number;
+  content: string;
+  created_at: string;
+}
+
 interface PattsonSpeechRecognitionResult {
   readonly isFinal: boolean;
   readonly length: number;
@@ -176,6 +182,8 @@ export default function Home() {
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [listening, setListening] = useState(false);
@@ -197,6 +205,8 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingOriginalTextRef = useRef("");
   const activeRequestIdRef = useRef(0);
+  const speakingRef = useRef(speaking);
+  const bargeInRecognitionRef = useRef<PattsonSpeechRecognition | null>(null);
 
   const orbState: OrbState = listening ? "listening" : speaking ? "speaking" : sending ? "thinking" : "standby";
 
@@ -216,6 +226,10 @@ export default function Home() {
     listeningRef.current = listening;
   }, [listening]);
 
+  useEffect(() => {
+    speakingRef.current = speaking;
+  }, [speaking]);
+
   function refreshActivity() {
     fetch("/api/activity")
       .then((res) => res.json())
@@ -225,9 +239,25 @@ export default function Home() {
       });
     fetch("/api/memory")
       .then((res) => res.json())
-      .then((data: { count: number }) => setMemoryCount(data.count))
+      .then((data: { count: number; memories: MemoryEntry[] }) => {
+        setMemoryCount(data.count);
+        setMemories(data.memories);
+      })
       .catch(() => {
-        // Non-critical -- just the sidebar count.
+        // Non-critical -- just the sidebar count and management panel.
+      });
+  }
+
+  function deleteMemory(id: number) {
+    // Optimistic: the panel is a quick management tool, not a form -- drop
+    // it from view immediately, then let refreshActivity reconcile with the
+    // server on the next poll (or right away, below) if anything mismatches.
+    setMemories((prev) => prev.filter((m) => m.id !== id));
+    setMemoryCount((prev) => (prev === null ? prev : Math.max(0, prev - 1)));
+    fetch(`/api/memory/${id}`, { method: "DELETE" })
+      .then(() => refreshActivity())
+      .catch(() => {
+        refreshActivity(); // resync in case the optimistic removal was wrong
       });
   }
 
@@ -259,6 +289,15 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceOverlayOpen]);
+
+  useEffect(() => {
+    if (!memoryPanelOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMemoryPanelOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [memoryPanelOpen]);
 
   function stopMicMeter() {
     if (meterRafRef.current !== null) {
@@ -324,6 +363,7 @@ export default function Home() {
   function stopSpeaking() {
     stopRequestedRef.current = true;
     clearPendingAutoRestart();
+    stopBargeInListener();
     window.speechSynthesis?.cancel();
     setSpeaking(false);
   }
@@ -408,6 +448,73 @@ export default function Home() {
     }
   }
 
+  function stopBargeInListener() {
+    bargeInRecognitionRef.current?.stop();
+    bargeInRecognitionRef.current = null;
+  }
+
+  // Runs silently in the background for the whole time Pat is talking, so
+  // the user can cut in mid-sentence like they would with a person instead
+  // of having to wait or tap the mic. Deliberately doesn't touch `listening`
+  // state -- this is a passive detector, not a real listening turn, so the
+  // UI keeps showing "speaking" until a genuine barge-in is confirmed. Reuses
+  // looksLikeSelfEcho against lastSpokenRef (the full reply currently being
+  // read aloud) so Pat's own voice bleeding into the mic doesn't trigger it.
+  function startBargeInListener() {
+    if (!voiceModeRef.current || listeningRef.current || bargeInRecognitionRef.current) return;
+
+    const SpeechRecognitionCtor = getSpeechRecognitionCtor();
+    if (!SpeechRecognitionCtor) return;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "en-GB";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      const lastResult = event.results[event.results.length - 1];
+      if (!lastResult?.isFinal) return;
+      if (looksLikeSelfEcho(transcript, lastSpokenRef.current)) return;
+
+      // Genuine barge-in: cut Pat off and treat this as the next message.
+      // The reply Pat was mid-sentence on is already fully saved to history
+      // (streaming finished before speak() was ever called), so this is a
+      // clean new turn, not an interrupt-and-restart like the thinking-phase
+      // case -- there's nothing in-flight to abort or clean up.
+      recognition.stop();
+      bargeInRecognitionRef.current = null;
+      stopSpeaking();
+      sendMessage(transcript);
+    };
+    recognition.onerror = () => {
+      if (bargeInRecognitionRef.current !== recognition) return;
+      bargeInRecognitionRef.current = null;
+    };
+    recognition.onend = () => {
+      if (bargeInRecognitionRef.current !== recognition) return;
+      bargeInRecognitionRef.current = null;
+      // Some implementations end a continuous session on their own even
+      // with nothing detected -- restart as long as Pat is still talking.
+      if (speakingRef.current && voiceModeRef.current && !listeningRef.current) {
+        startBargeInListener();
+      }
+    };
+
+    bargeInRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch {
+      // If two recognition sessions can't coexist on this browser, barge-in
+      // simply doesn't activate -- the user can still tap the mic manually,
+      // same as before this feature existed.
+      bargeInRecognitionRef.current = null;
+    }
+  }
+
   function closeVoiceOverlay() {
     voiceModeRef.current = false;
     stopSpeaking();
@@ -439,9 +546,11 @@ export default function Home() {
     utterance.onstart = () => {
       setSpeaking(true);
       setVoiceOverlayOpen(true);
+      startBargeInListener();
     };
     utterance.onend = () => {
       setSpeaking(false);
+      stopBargeInListener();
       const wasStopped = stopRequestedRef.current;
       stopRequestedRef.current = false;
       // Hands-free follow-through: once Pat finishes speaking, listen
@@ -459,6 +568,7 @@ export default function Home() {
     };
     utterance.onerror = () => {
       setSpeaking(false);
+      stopBargeInListener();
       stopRequestedRef.current = false;
     };
     window.speechSynthesis.speak(utterance);
@@ -698,7 +808,9 @@ export default function Home() {
           <div className={styles.sidebarMeta}>
             <span>Model · Claude Sonnet 5</span>
             <span>Session · Local-first</span>
-            <span>Memory · {memoryCount === null ? "…" : `${memoryCount} fact${memoryCount === 1 ? "" : "s"}`}</span>
+            <button type="button" className={styles.memoryTrigger} onClick={() => setMemoryPanelOpen(true)}>
+              Memory · {memoryCount === null ? "…" : `${memoryCount} fact${memoryCount === 1 ? "" : "s"}`}
+            </button>
           </div>
         </aside>
 
@@ -834,6 +946,51 @@ export default function Home() {
               <button type="button" className={styles.stop} onClick={handleStopButton}>
                 Stop
               </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {memoryPanelOpen && (
+        <div
+          className={styles.memoryPanel}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Manage Pat's memory"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setMemoryPanelOpen(false);
+          }}
+        >
+          <div className={styles.memoryPanelInner}>
+            <div className={styles.memoryPanelHead}>
+              <h2>Memory</h2>
+              <button
+                type="button"
+                className={styles.memoryPanelClose}
+                aria-label="Close memory panel"
+                onClick={() => setMemoryPanelOpen(false)}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            {memories.length === 0 ? (
+              <p className={styles.ledgerEmpty}>Nothing remembered yet, sir.</p>
+            ) : (
+              <ul className={styles.memoryList}>
+                {memories.map((m) => (
+                  <li key={m.id} className={styles.memoryItem}>
+                    <span className={styles.memoryItemText}>{m.content}</span>
+                    <button
+                      type="button"
+                      className={styles.memoryItemDelete}
+                      aria-label={`Forget: ${m.content}`}
+                      onClick={() => deleteMemory(m.id)}
+                    >
+                      <CloseIcon />
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         </div>

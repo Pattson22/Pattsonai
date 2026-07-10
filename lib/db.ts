@@ -38,6 +38,14 @@ function createDb(): Database.Database {
       content TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content TEXT NOT NULL,
+      due_at TEXT,
+      completed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   return db;
@@ -142,4 +150,39 @@ export function deleteMemoriesMatching(topic: string): number {
     .prepare("DELETE FROM memories WHERE content LIKE ? COLLATE NOCASE")
     .run(`%${topic}%`);
   return info.changes;
+}
+
+/** Deletes a single memory by id, for the sidebar's manage-memories UI. */
+export function deleteMemoryById(id: number): boolean {
+  const info = db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+  return info.changes > 0;
+}
+
+export interface Reminder {
+  id: number;
+  content: string;
+  due_at: string | null;
+  completed: 0 | 1;
+  created_at: string;
+}
+
+export function insertReminder(content: string, dueAt: string | null): number {
+  const info = db
+    .prepare("INSERT INTO reminders (content, due_at) VALUES (?, ?)")
+    .run(content, dueAt);
+  return Number(info.lastInsertRowid);
+}
+
+/** Open reminders (or all, if `includeCompleted`), soonest due date first --
+ * reminders with no due date sort last since there's nothing to order them by. */
+export function listReminders(includeCompleted = false): Reminder[] {
+  const query = includeCompleted
+    ? "SELECT * FROM reminders ORDER BY (due_at IS NULL), due_at ASC"
+    : "SELECT * FROM reminders WHERE completed = 0 ORDER BY (due_at IS NULL), due_at ASC";
+  return db.prepare(query).all() as Reminder[];
+}
+
+export function completeReminder(id: number): boolean {
+  const info = db.prepare("UPDATE reminders SET completed = 1 WHERE id = ?").run(id);
+  return info.changes > 0;
 }

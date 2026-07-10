@@ -90,7 +90,8 @@ Meta until the permission is granted.
   with a local `handler`, logged to `activity_log`) — see below for the
   one server-executed tool.
 - `lib/db.ts` — SQLite (`better-sqlite3`), local-first: `conversations`,
-  `activity_log`, and `memories` tables in `data/pattson.db` (gitignored).
+  `activity_log`, `memories`, and `reminders` tables in `data/pattson.db`
+  (gitignored).
 
 ### Memory
 
@@ -102,8 +103,21 @@ projects) and `forget_fact` (deletes anything matching a substring, for
 corrections). All remembered facts (capped at the most recent 60, same
 defensive limit as conversation history) are injected into every system
 prompt as a `## KNOWN CONTEXT ABOUT THE USER` section — see
-`buildSystemPrompt` in `lib/persona.ts`. The sidebar shows a live count;
-there's no dedicated memory-browsing UI yet.
+`buildSystemPrompt` in `lib/persona.ts`. Click "Memory · N facts" in the
+sidebar to open a panel listing everything remembered, each with its own
+delete button (`DELETE /api/memory/[id]`) — no need to ask Pat to forget
+something, you can just remove it directly.
+
+### Weather and reminders
+
+- `lib/tools/weather.ts` — `get_weather`, backed by Open-Meteo (free,
+  keyless: a geocoding call to resolve a place name, then a forecast call
+  for current conditions). No API key to configure.
+- `lib/tools/reminders.ts` — `add_reminder`, `list_reminders`,
+  `complete_reminder`, backed by the `reminders` table. Relative phrasing
+  ("tomorrow at 9am") is resolved to an absolute ISO datetime by Claude
+  itself using the current-date context already in the system prompt (see
+  Performance below), not parsed locally.
 
 ### Code execution
 
@@ -148,6 +162,23 @@ device except to your own Anthropic API calls for the text turn itself.
 - The orb's glow tracks your actual mic volume while listening (a second
   `getUserMedia` stream feeds a Web Audio `AnalyserNode`; not just a canned
   animation).
+- Voice selection prefers higher-quality system voices automatically
+  (anything with "natural"/"neural"/"premium"/"enhanced" in its name, e.g.
+  Windows 11's cloud-backed "Online (Natural)" voices) over legacy
+  robotic-sounding ones, with a slightly slower rate/lower pitch tuned for
+  a more natural cadence — see `pickBritishVoice` in `app/page.tsx`. Free,
+  no added latency: it's still just ranking the browser's own voice list.
+- **Interrupting a reply**: tap the mic (or just start talking) while Pat
+  is still thinking/streaming, and your follow-up is folded into the
+  original request and sent as a fresh turn — the abandoned turn's
+  in-flight server request is aborted (`AbortSignal` threaded through to
+  the Anthropic SDK call) and its orphaned DB row is cleaned up, not left
+  as an unanswered message.
+- **Barge-in while Pat is speaking**: a background recognizer runs for the
+  whole time Pat is talking, so you can cut in mid-sentence like a real
+  conversation instead of waiting or tapping Stop first. It reuses the
+  same self-echo guard as hands-free listening so Pat's own voice coming
+  back through the mic doesn't trigger it.
 - Browser support: `SpeechRecognition` is Chrome/Edge only as of 2026
   (no Firefox, partial Safari) — the mic control and Voice mode pill
   hide themselves automatically when unsupported.

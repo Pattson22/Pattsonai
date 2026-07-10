@@ -1,5 +1,6 @@
-import { countMemories } from "@/lib/db";
+import { countMemories, getAllMemories } from "@/lib/db";
 
 export async function GET() {
-  return Response.json({ count: countMemories() });
+  const memories = getAllMemories();
+  return Response.json({ count: countMemories(), memories });
 }
